@@ -45,6 +45,25 @@ export interface Interpretation {
   fr: string;
 }
 
+export interface StrategyResult {
+  finalValue: number;
+  returnPct: number;
+  sharesEquivalent: number;
+  trades: number;
+}
+
+export interface StrategyComparison {
+  sellThresholdPct: number;
+  rebuyDropPct: number;
+  rebuyFixedDays: number;
+  initialClose: number;
+  finalClose: number;
+  buyAndHold: StrategyResult;
+  sellRebuyOnDrop: StrategyResult;
+  sellRebuyFixedDays: StrategyResult;
+  bestStrategy: "buyAndHold" | "sellRebuyOnDrop" | "sellRebuyFixedDays";
+}
+
 export interface AnalysisResult {
   ticker: string;
   days: number;
@@ -61,7 +80,8 @@ export interface AnalysisResult {
   postRiseCurves: Record<string, PostRiseCurve>; // keys "5" | "10" | "15"
   sellVsWait: SellVsWaitStats;
   rebuyAfterRise: RebuyStats;
-  interpretations: Record<string, Interpretation>; // overview, strongRise, postRise, sellVsWait, rebuy
+  strategyComparison: StrategyComparison | null;
+  interpretations: Record<string, Interpretation>; // overview, strongRise, postRise, sellVsWait, rebuy, strategy
   interpretationSource: "ai" | "rules";
 }
 

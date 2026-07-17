@@ -38,9 +38,24 @@ work from wherever you run them, so this reuses that same working path.
 | main.py / main2.py | `analyze_after_rise()` | `postRiseCurves` → **"What happens after a strong run-up?"** section (`PostRiseCurveChart`) |
 | main.py / main3.py | `analyze_sell_vs_wait()` | `sellVsWait` → **"Sell early vs. hold for more"** section (`SellVsWaitCard`) |
 | main.py / main4.py | `analyze_rebuy_after_5()` | `rebuyAfterRise` → **"Buying the dip after a rise"** section (`RebuyCard`) |
+| — (new) | 3-way backtest | `strategyComparison` → **"Strategy comparison: hold vs. sell & rebuy"** section (`StrategyComparisonCard`): buy & hold vs. sell at +X% & rebuy on a -Y% drop vs. sell at +X% & rebuy after N fixed days, comparing final return % and shares held |
 | main.py `plt.hist(...)` | histograms | `HistogramChart` (recharts, client-side) |
 | main.py `plt.plot(...)` price / trend-strength | `PriceChart`, `TrendBarChart` |
 | printed summary table | `SummaryTable` |
+
+## A bug fixed from the original scripts
+
+The original `main.py`/`main2.py`/`main4.py` sort history newest-first and
+then walk *forward in array position* to find "what happens after" a
+streak. On a newest-first frame, walking forward in array position actually
+walks **backward in calendar time** — so the original "post-rise",
+next-day-reversal, and rebuy-drawdown analyses were unintentionally
+measuring the days *leading into* a streak, not the days *following* it
+(this only ever behaved correctly for one-day streaks). `backend/main.py`
+now runs these specific analyses against a chronologically ascending copy
+of the history (`hist_asc`) instead, so "after" genuinely means after.
+`compute_trend_summary()` itself is unaffected — grouping streaks doesn't
+depend on scan direction, only which day ends up used as each streak's label.
 
 ## Beginner interpretations (EN/FR, AI-assisted)
 

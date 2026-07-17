@@ -127,20 +127,29 @@ def compute_trend_summary(df: pd.DataFrame, column: str = "Variation %") -> pd.D
 # Tactical / momentum analyses (ported from main.py, main2/3/4.py)
 # ==========================
 
-def analyze_after_rise(hist: pd.DataFrame, summary: pd.DataFrame, threshold: float = 10.0, days_after: int = 10) -> pd.DataFrame:
+def analyze_after_rise(hist_asc: pd.DataFrame, summary: pd.DataFrame, threshold: float = 10.0, days_after: int = 10) -> pd.DataFrame:
     """Average day-by-day performance in the `days_after` sessions following
     the END of a streak whose total move was >= threshold. (main.py / main2.py)
+
+    IMPORTANT: `hist_asc` must be sorted chronologically ascending (oldest
+    first). The original scripts computed this on a newest-first frame and
+    walked forward in *array position*, which — on a reversed frame — walks
+    backward in *calendar time*, i.e. it accidentally measured the days
+    leading INTO the streak rather than what followed it. This version
+    fixes that by looking up the streak's end date in the ascending frame
+    and reading the rows genuinely after it.
     """
     results = []
     strong = summary[summary["Trend Total %"] >= threshold]
 
     for date in strong.index:
-        position = hist.index.get_loc(date)
-        trend_end = position + int(strong.loc[date, "Trend Days"])
-        future = hist.iloc[trend_end: trend_end + days_after]
+        if date not in hist_asc.index:
+            continue
+        position = hist_asc.index.get_loc(date)  # position of the streak's most recent (end) day
+        future = hist_asc.iloc[position + 1: position + 1 + days_after]
 
         if len(future) == days_after:
-            start_price = hist.iloc[trend_end - 1]["Close"]
+            start_price = hist_asc.iloc[position]["Close"]  # close on the day the streak ended
             curve = []
             for _, row in future.iterrows():
                 variation = ((row["Close"] - start_price) / start_price) * 100
@@ -166,17 +175,20 @@ def analyze_sell_vs_wait(summary: pd.DataFrame, threshold_sell: float = 5.0, tar
     return pd.DataFrame(results)
 
 
-def analyze_rebuy_after_5(hist: pd.DataFrame, summary: pd.DataFrame, threshold: float = 5.0, days_after: int = 20) -> pd.DataFrame:
+def analyze_rebuy_after_5(hist_asc: pd.DataFrame, summary: pd.DataFrame, threshold: float = 5.0, days_after: int = 20) -> pd.DataFrame:
     """After a streak reaches at least +threshold%, how far does the price
     pull back over the following `days_after` sessions, and how many days
     does that pullback take to bottom out? (main.py / main4.py)
+
+    `hist_asc` must be sorted chronologically ascending — see the note on
+    `analyze_after_rise` for why this matters.
     """
     results = []
     for date, row in summary.iterrows():
-        if row["Trend Total %"] >= threshold:
-            position = hist.index.get_loc(date)
-            sell_price = hist.iloc[position]["Close"]
-            future = hist.iloc[position + 1: position + 1 + days_after]
+        if row["Trend Total %"] >= threshold and date in hist_asc.index:
+            position = hist_asc.index.get_loc(date)
+            sell_price = hist_asc.iloc[position]["Close"]
+            future = hist_asc.iloc[position + 1: position + 1 + days_after]
 
             if len(future) > 0:
                 min_price = future["Close"].min()
@@ -193,6 +205,124 @@ def analyze_rebuy_after_5(hist: pd.DataFrame, summary: pd.DataFrame, threshold: 
                     "Waiting days": days_wait,
                 })
     return pd.DataFrame(results)
+
+
+def simulate_strategies(
+    hist_asc: pd.DataFrame,
+    summary: pd.DataFrame,
+    sell_threshold: float = 5.0,
+    rebuy_drop_pct: float = 10.0,
+    rebuy_fixed_days: int = 10,
+) -> dict:
+    """Backtests three approaches over the full chronological history,
+    starting from 1 share bought on day 0, and compares the final position:
+
+      1. Buy & hold — never trade.
+      2. Sell whenever a streak closes at >= sell_threshold%, then rebuy
+         once the price has fallen rebuy_drop_pct% from the sell price
+         (or, if that drop never happens, stay in cash to the end).
+      3. Same sell trigger, but rebuy a fixed rebuy_fixed_days sessions
+         later regardless of price.
+
+    This directly answers: "sell at +5%, rebuy at -10%" vs. "sell at +5%,
+    rebuy after 10 days" vs. "just hold" — which gives the best final
+    number of shares / return? All decisions only ever use data already
+    known as of that trading day (no lookahead).
+    """
+    closes = hist_asc["Close"]
+    n = len(hist_asc)
+    if n < 2:
+        return None
+
+    first_close = float(closes.iloc[0])
+    last_close = float(closes.iloc[-1])
+
+    # Every streak-end date that cleared the sell threshold, converted to
+    # array positions in the ascending frame, in chronological order.
+    sell_dates = summary[summary["Trend Total %"] >= sell_threshold].index
+    sell_positions = sorted(
+        hist_asc.index.get_loc(d) for d in sell_dates if d in hist_asc.index
+    )
+
+    def run(mode: str) -> dict:
+        shares = 1.0
+        cash = 0.0
+        holding = True
+        trades = 0
+        pos = 0
+        sp_i = 0  # pointer into sell_positions
+
+        while pos < n:
+            # Skip any sell signals we've already passed (strictly before pos).
+            # Using '<' (not '<=') here matters: a signal AT pos must still be
+            # visible to the trade check below on this same iteration.
+            while sp_i < len(sell_positions) and sell_positions[sp_i] < pos:
+                sp_i += 1
+
+            if holding and sp_i < len(sell_positions) and sell_positions[sp_i] == pos and pos > 0:
+                sell_price = float(closes.iloc[pos])
+                cash = shares * sell_price
+                shares = 0.0
+                holding = False
+                trades += 1
+
+                if mode == "fixed_days":
+                    rebuy_pos = min(pos + rebuy_fixed_days, n - 1)
+                else:  # drop
+                    target_price = sell_price * (1 - rebuy_drop_pct / 100)
+                    rebuy_pos = None
+                    for d in range(pos + 1, n):
+                        if float(closes.iloc[d]) <= target_price:
+                            rebuy_pos = d
+                            break
+                    if rebuy_pos is None:
+                        rebuy_pos = n - 1  # drop never happened — stay in cash to the end
+
+                buy_price = float(closes.iloc[rebuy_pos])
+                shares = cash / buy_price
+                cash = 0.0
+                holding = True
+                pos = rebuy_pos
+                continue
+
+            pos += 1
+
+        final_value = shares * last_close + cash
+        return {
+            "finalValue": final_value,
+            "returnPct": (final_value - first_close) / first_close * 100,
+            "sharesEquivalent": final_value / last_close,
+            "trades": trades,
+        }
+
+    buy_hold_value = 1.0 * last_close
+    buy_hold = {
+        "finalValue": buy_hold_value,
+        "returnPct": (buy_hold_value - first_close) / first_close * 100,
+        "sharesEquivalent": 1.0,
+        "trades": 0,
+    }
+    sell_rebuy_drop = run("drop")
+    sell_rebuy_fixed = run("fixed_days")
+
+    strategies = {
+        "buyAndHold": buy_hold,
+        "sellRebuyOnDrop": sell_rebuy_drop,
+        "sellRebuyFixedDays": sell_rebuy_fixed,
+    }
+    best_key = max(strategies, key=lambda k: strategies[k]["returnPct"])
+
+    return {
+        "sellThresholdPct": sell_threshold,
+        "rebuyDropPct": rebuy_drop_pct,
+        "rebuyFixedDays": rebuy_fixed_days,
+        "initialClose": first_close,
+        "finalClose": last_close,
+        "buyAndHold": buy_hold,
+        "sellRebuyOnDrop": sell_rebuy_drop,
+        "sellRebuyFixedDays": sell_rebuy_fixed,
+        "bestStrategy": best_key,
+    }
 
 
 def series_stats(values: pd.Series) -> dict:
@@ -238,6 +368,10 @@ def rule_based_interpretations(snap: dict) -> Dict[str, Dict[str, str]]:
     post_rise = snap["postRiseCurves"]
     sell_vs_wait = snap["sellVsWait"]
     rebuy = snap["rebuyAfterRise"]
+
+    def fmtnum(v: float) -> str:
+        return f"{v:+.1f}"
+
 
     out: Dict[str, Dict[str, str]] = {}
 
@@ -363,6 +497,43 @@ def rule_based_interpretations(snap: dict) -> Dict[str, Dict[str, str]]:
             "fr": "Aucune série n'a atteint le seuil de rachat sur cette période, il n'y a donc pas de repli à afficher.",
         }
 
+    # --- Strategy comparison: buy & hold vs. sell+rebuy on a drop vs. sell+rebuy after N days ---
+    strat = snap.get("strategyComparison")
+    if strat:
+        bh, drop, fixed = strat["buyAndHold"], strat["sellRebuyOnDrop"], strat["sellRebuyFixedDays"]
+        labels = {
+            "buyAndHold": ("buying and holding", "acheter et garder"),
+            "sellRebuyOnDrop": (
+                f"selling at +{strat['sellThresholdPct']:.0f}% and rebuying after a -{strat['rebuyDropPct']:.0f}% drop",
+                f"vendre à +{strat['sellThresholdPct']:.0f}% et racheter après un repli de -{strat['rebuyDropPct']:.0f}%",
+            ),
+            "sellRebuyFixedDays": (
+                f"selling at +{strat['sellThresholdPct']:.0f}% and rebuying {strat['rebuyFixedDays']} days later",
+                f"vendre à +{strat['sellThresholdPct']:.0f}% et racheter {strat['rebuyFixedDays']} jours plus tard",
+            ),
+        }
+        best_en, best_fr = labels[strat["bestStrategy"]]
+        out["strategy"] = {
+            "en": (
+                f"Starting from 1 share, {ticker} would have ended at {fmtnum(bh['returnPct'])}% with a simple "
+                f"buy-and-hold, {fmtnum(drop['returnPct'])}% selling at +{strat['sellThresholdPct']:.0f}% and "
+                f"rebuying on a -{strat['rebuyDropPct']:.0f}% drop ({drop['trades']} round-trips), and "
+                f"{fmtnum(fixed['returnPct'])}% selling at +{strat['sellThresholdPct']:.0f}% and rebuying "
+                f"{strat['rebuyFixedDays']} days later ({fixed['trades']} round-trips). In this backtest, "
+                f"{best_en} came out ahead. Real trading adds taxes, fees, and slippage this doesn't model, "
+                "and past outperformance of one rule doesn't guarantee it repeats."
+            ),
+            "fr": (
+                f"En partant d'une action, {ticker} aurait terminé à {fmtnum(bh['returnPct'])}% en achetant et "
+                f"gardant simplement, à {fmtnum(drop['returnPct'])}% en vendant à +{strat['sellThresholdPct']:.0f}% "
+                f"et en rachetant après un repli de -{strat['rebuyDropPct']:.0f}% ({drop['trades']} allers-retours), "
+                f"et à {fmtnum(fixed['returnPct'])}% en vendant à +{strat['sellThresholdPct']:.0f}% et en rachetant "
+                f"{strat['rebuyFixedDays']} jours plus tard ({fixed['trades']} allers-retours). Dans ce backtest, "
+                f"la stratégie '{best_fr}' arrive en tête. Le trading réel ajoute impôts, frais et glissement de "
+                "prix non modélisés ici, et la surperformance passée d'une règle ne garantit pas qu'elle se répète."
+            ),
+        }
+
     return out
 
 
@@ -376,6 +547,9 @@ def ai_interpretations(snap: dict) -> Optional[Dict[str, Dict[str, str]]]:
         return None
 
     sections = ["overview", "strongRise", "postRise", "sellVsWait", "rebuy"]
+    if snap.get("strategyComparison"):
+        sections.append("strategy")
+    section_shape = ", ".join(f'"{s}": {{"en": "...", "fr": "..."}}' for s in sections)
     prompt = f"""You are a patient financial-literacy educator writing for a complete beginner
 investor who has never looked at a stock chart before. You will be given a JSON
 snapshot of a purely historical, backward-looking streak analysis for one stock.
@@ -385,9 +559,13 @@ sections: {sections}. Rules:
 - Use ONLY the numbers given below; never invent figures.
 - Plain, warm, jargon-free language a novice can follow.
 - Make clear this describes the past, not a prediction, and is not financial advice.
+- If a "strategy" section is requested, name which of the three simulated
+  strategies (buyAndHold, sellRebuyOnDrop, sellRebuyFixedDays) had the
+  higher returnPct in this backtest, and note that real trading has taxes,
+  fees, and slippage this doesn't model.
 - Provide both an "en" (English) and "fr" (French) version of every section.
 - Respond with ONLY a raw JSON object shaped like:
-  {{"overview": {{"en": "...", "fr": "..."}}, "strongRise": {{"en": "...", "fr": "..."}}, "postRise": {{"en": "...", "fr": "..."}}, "sellVsWait": {{"en": "...", "fr": "..."}}, "rebuy": {{"en": "...", "fr": "..."}}}}
+  {{{section_shape}}}
   No markdown fences, no preamble, no commentary outside the JSON.
 
 Stats snapshot:
@@ -422,6 +600,7 @@ def build_snapshot(
     post_rise_curves: dict,
     sell_vs_wait: dict,
     rebuy_after_rise: dict,
+    strategy_comparison: Optional[dict] = None,
 ) -> dict:
     return {
         "ticker": ticker,
@@ -433,6 +612,7 @@ def build_snapshot(
         "postRiseCurves": post_rise_curves,
         "sellVsWait": sell_vs_wait,
         "rebuyAfterRise": rebuy_after_rise,
+        "strategyComparison": strategy_comparison,
     }
 
 
@@ -494,6 +674,25 @@ class Interpretation(BaseModel):
     fr: str
 
 
+class StrategyResult(BaseModel):
+    finalValue: float
+    returnPct: float
+    sharesEquivalent: float
+    trades: int
+
+
+class StrategyComparison(BaseModel):
+    sellThresholdPct: float
+    rebuyDropPct: float
+    rebuyFixedDays: int
+    initialClose: float
+    finalClose: float
+    buyAndHold: StrategyResult
+    sellRebuyOnDrop: StrategyResult
+    sellRebuyFixedDays: StrategyResult
+    bestStrategy: str
+
+
 class AnalysisResult(BaseModel):
     ticker: str
     days: int
@@ -510,6 +709,7 @@ class AnalysisResult(BaseModel):
     postRiseCurves: Dict[str, PostRiseCurve]
     sellVsWait: SellVsWaitStats
     rebuyAfterRise: RebuyStats
+    strategyComparison: Optional[StrategyComparison]
     interpretations: Dict[str, Interpretation]
     interpretationSource: str  # "ai" | "rules"
 
@@ -523,6 +723,8 @@ def analyze(
     sellTarget: float = Query(10.0, gt=0),
     rebuyThreshold: float = Query(5.0, gt=0),
     rebuyDays: int = Query(20, ge=1, le=250),
+    rebuyDropPct: float = Query(10.0, gt=0, description="Strategy simulator: buy back after the price falls this % from the sell price."),
+    rebuyFixedDays: int = Query(10, ge=1, le=250, description="Strategy simulator: buy back this many trading days after selling, regardless of price."),
     ai: bool = Query(True, description="Try an AI-generated interpretation before falling back to rule-based text."),
 ):
     ticker = ticker.strip().upper()
@@ -551,7 +753,16 @@ def analyze(
     # Trim to the requested number of most recent trading days.
     hist = hist.iloc[-days:]
 
-    # Newest date first, same as main.py.
+    # Chronological (oldest first) copy — this is the only correct frame for
+    # anything that means "what happened AFTER this date" (post-rise curves,
+    # reversal odds, rebuy timing, strategy simulation). See the notes on
+    # analyze_after_rise / analyze_rebuy_after_5 above.
+    hist_asc = hist.sort_index(ascending=True)
+
+    # Newest date first — kept only for compute_trend_summary, which groups
+    # streaks by scanning from the most recent day backward; this ordering
+    # doesn't affect which days end up grouped together, just the scan
+    # direction, so it's unaffected by the bug described above.
     hist = hist.sort_index(ascending=False)
 
     summary = compute_trend_summary(hist)
@@ -564,13 +775,15 @@ def analyze(
     avg_duration = float(strong_rises["Trend Days"].mean()) if len(strong_rises) > 0 else None
     avg_rise = float(strong_rises["Trend Total %"].mean()) if len(strong_rises) > 0 else None
 
-    # Reversal check: for each strong-rise start date, look at the adjacent
-    # row in the descending-sorted series — identical indexing to main.py.
+    # Reversal check: for each strong-rise's end date, look at the very next
+    # trading day chronologically (using the ascending frame — see note above).
     reversals = 0
     for date in strong_rises.index:
-        position = hist.index.get_loc(date)
-        if position + 1 < len(hist):
-            next_day_variation = hist.iloc[position + 1]["Variation %"]
+        if date not in hist_asc.index:
+            continue
+        position = hist_asc.index.get_loc(date)
+        if position + 1 < len(hist_asc):
+            next_day_variation = hist_asc.iloc[position + 1]["Variation %"]
             if next_day_variation < 0:
                 reversals += 1
 
@@ -582,7 +795,7 @@ def analyze(
     # --- Post-rise performance curves at +5% / +10% / +15% (main.py / main2.py) ---
     post_rise_curves: Dict[str, dict] = {}
     for th in (5.0, 10.0, 15.0):
-        curve_df = analyze_after_rise(hist, summary, threshold=th, days_after=10)
+        curve_df = analyze_after_rise(hist_asc, summary, threshold=th, days_after=10)
         avg_curve = [clean(float(x)) for x in curve_df.mean().tolist()] if len(curve_df) > 0 else []
         post_rise_curves[str(int(th))] = {
             "thresholdPct": th,
@@ -601,7 +814,7 @@ def analyze(
     }
 
     # --- Rebuy after a rise: pullback depth + timing (main.py / main4.py) ---
-    rebuy_df = analyze_rebuy_after_5(hist, summary, threshold=rebuyThreshold, days_after=rebuyDays)
+    rebuy_df = analyze_rebuy_after_5(hist_asc, summary, threshold=rebuyThreshold, days_after=rebuyDays)
     rebuy_after_rise = {
         "thresholdPct": rebuyThreshold,
         "daysAfter": rebuyDays,
@@ -609,6 +822,24 @@ def analyze(
         "avgDropPct": clean(float(rebuy_df["Drop %"].mean())) if len(rebuy_df) > 0 else None,
         "avgWaitingDays": clean(float(rebuy_df["Waiting days"].mean())) if len(rebuy_df) > 0 else None,
     }
+
+    # --- Strategy comparison: buy & hold vs. sell+rebuy-on-drop vs. sell+rebuy-after-N-days ---
+    strategy_comparison = simulate_strategies(
+        hist_asc,
+        summary,
+        sell_threshold=sellThreshold,
+        rebuy_drop_pct=rebuyDropPct,
+        rebuy_fixed_days=rebuyFixedDays,
+    )
+    if strategy_comparison:
+        for res in (
+            strategy_comparison["buyAndHold"],
+            strategy_comparison["sellRebuyOnDrop"],
+            strategy_comparison["sellRebuyFixedDays"],
+        ):
+            res["finalValue"] = clean(res["finalValue"])
+            res["returnPct"] = clean(res["returnPct"])
+            res["sharesEquivalent"] = clean(res["sharesEquivalent"])
 
     def row_to_dict(idx, row) -> dict:
         return {
@@ -621,7 +852,7 @@ def analyze(
 
     price_series = [
         {"date": idx.strftime("%Y-%m-%d"), "close": clean(float(close))}
-        for idx, close in hist.sort_index(ascending=True)["Close"].items()
+        for idx, close in hist_asc["Close"].items()
     ]
 
     positive_stats = series_stats(positive["Trend Total %"])
@@ -642,6 +873,7 @@ def analyze(
         post_rise_curves=post_rise_curves,
         sell_vs_wait=sell_vs_wait,
         rebuy_after_rise=rebuy_after_rise,
+        strategy_comparison=strategy_comparison,
     )
 
     interpretations = None
@@ -670,6 +902,7 @@ def analyze(
         "postRiseCurves": post_rise_curves,
         "sellVsWait": sell_vs_wait,
         "rebuyAfterRise": rebuy_after_rise,
+        "strategyComparison": strategy_comparison,
         "interpretations": interpretations,
         "interpretationSource": interpretation_source,
     }

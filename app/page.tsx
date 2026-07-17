@@ -12,6 +12,7 @@ import SummaryTable from "@/components/SummaryTable";
 import PostRiseCurveChart from "@/components/PostRiseCurveChart";
 import SellVsWaitCard from "@/components/SellVsWaitCard";
 import RebuyCard from "@/components/RebuyCard";
+import StrategyComparisonCard from "@/components/StrategyComparisonCard";
 import InterpretationBox from "@/components/InterpretationBox";
 import LanguageToggle from "@/components/LanguageToggle";
 
@@ -36,6 +37,8 @@ export default function Home() {
   const [sellTarget, setSellTarget] = useState(10);
   const [rebuyThreshold, setRebuyThreshold] = useState(5);
   const [rebuyDays, setRebuyDays] = useState(20);
+  const [rebuyDropPct, setRebuyDropPct] = useState(10);
+  const [rebuyFixedDays, setRebuyFixedDays] = useState(10);
   const [aiEnabled, setAiEnabled] = useState(true);
 
   const [loading, setLoading] = useState(false);
@@ -57,6 +60,8 @@ export default function Home() {
         sellTarget: String(sellTarget),
         rebuyThreshold: String(rebuyThreshold),
         rebuyDays: String(rebuyDays),
+        rebuyDropPct: String(rebuyDropPct),
+        rebuyFixedDays: String(rebuyFixedDays),
         ai: String(aiEnabled),
       });
       const res = await fetch(`${apiBase}/api/analyze?${params.toString()}`);
@@ -227,6 +232,31 @@ export default function Home() {
                   className="w-20 rounded-md border border-line bg-panel px-3 py-2 font-mono text-sm text-fg outline-none focus:border-amber"
                 />
               </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] uppercase tracking-wider text-muted">{s.strategyDropParamLabel}</label>
+                <div className="flex items-center gap-1">
+                  <input
+                    type="number"
+                    min={0.5}
+                    step={0.5}
+                    value={rebuyDropPct}
+                    onChange={(e) => setRebuyDropPct(parseFloat(e.target.value || "0"))}
+                    className="w-20 rounded-md border border-line bg-panel px-3 py-2 font-mono text-sm text-fg outline-none focus:border-amber"
+                  />
+                  <span className="text-sm text-muted">%</span>
+                </div>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] uppercase tracking-wider text-muted">{s.strategyFixedParamLabel}</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={250}
+                  value={rebuyFixedDays}
+                  onChange={(e) => setRebuyFixedDays(parseInt(e.target.value || "0", 10))}
+                  className="w-20 rounded-md border border-line bg-panel px-3 py-2 font-mono text-sm text-fg outline-none focus:border-amber"
+                />
+              </div>
 
               <label className="ml-auto flex max-w-xs items-start gap-2">
                 <input
@@ -353,6 +383,18 @@ export default function Home() {
               </div>
               <InterpretationBox text={interp("rebuy")} lang={lang} source={result.interpretationSource} />
             </section>
+
+            {/* --- Strategy comparison: buy&hold vs sell+rebuy(-drop) vs sell+rebuy(fixed days) --- */}
+            {result.strategyComparison && (
+              <section className="rounded-lg border border-line bg-panel p-4">
+                <h2 className="font-display text-sm font-semibold text-fg">{s.sectionStrategy}</h2>
+                <p className="text-xs text-muted">{s.sectionStrategySub}</p>
+                <div className="mt-3">
+                  <StrategyComparisonCard data={result.strategyComparison} lang={lang} />
+                </div>
+                <InterpretationBox text={interp("strategy")} lang={lang} source={result.interpretationSource} />
+              </section>
+            )}
 
             <section className="rounded-lg border border-line bg-panel p-4">
               <h2 className="font-display text-sm font-semibold text-fg">{s.sectionAllStreaks}</h2>
