@@ -18,6 +18,33 @@ export interface Stats {
   max: number | null;
 }
 
+export interface PostRiseCurve {
+  thresholdPct: number;
+  count: number;
+  avgCurve: number[]; // day 1..N average % drift, [] if count === 0
+}
+
+export interface SellVsWaitStats {
+  thresholdPct: number;
+  targetPct: number;
+  count: number;
+  pctReachingTarget: number | null;
+  avgMaxReached: number | null;
+}
+
+export interface RebuyStats {
+  thresholdPct: number;
+  daysAfter: number;
+  count: number;
+  avgDropPct: number | null;
+  avgWaitingDays: number | null;
+}
+
+export interface Interpretation {
+  en: string;
+  fr: string;
+}
+
 export interface AnalysisResult {
   ticker: string;
   days: number;
@@ -31,6 +58,11 @@ export interface AnalysisResult {
   reversalProbabilityPct: number | null;
   overallPositiveAvgDuration: number | null;
   overallNegativeAvgDuration: number | null;
+  postRiseCurves: Record<string, PostRiseCurve>; // keys "5" | "10" | "15"
+  sellVsWait: SellVsWaitStats;
+  rebuyAfterRise: RebuyStats;
+  interpretations: Record<string, Interpretation>; // overview, strongRise, postRise, sellVsWait, rebuy
+  interpretationSource: "ai" | "rules";
 }
 
 // Simple histogram binning for the distribution charts.

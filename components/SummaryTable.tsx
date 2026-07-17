@@ -1,16 +1,18 @@
 import { TrendRow } from "@/lib/trend";
+import { Lang, t } from "@/lib/i18n";
 
-export default function SummaryTable({ rows }: { rows: TrendRow[] }) {
+export default function SummaryTable({ rows, lang = "en" }: { rows: TrendRow[]; lang?: Lang }) {
+  const s = t(lang);
   return (
     <div className="max-h-[480px] overflow-y-auto rounded-lg border border-line">
       <table className="w-full border-collapse font-mono text-xs tabular">
         <thead className="sticky top-0 bg-panel2">
           <tr className="text-left text-muted">
-            <th className="border-b border-line px-3 py-2 font-medium">Date</th>
-            <th className="border-b border-line px-3 py-2 font-medium">Close</th>
-            <th className="border-b border-line px-3 py-2 font-medium">Variation %</th>
-            <th className="border-b border-line px-3 py-2 font-medium">Trend total %</th>
-            <th className="border-b border-line px-3 py-2 font-medium">Trend days</th>
+            <th className="border-b border-line px-3 py-2 font-medium">{s.tableDate}</th>
+            <th className="border-b border-line px-3 py-2 font-medium">{s.tableClose}</th>
+            <th className="border-b border-line px-3 py-2 font-medium">{s.tableVariation}</th>
+            <th className="border-b border-line px-3 py-2 font-medium">{s.tableTrendTotal}</th>
+            <th className="border-b border-line px-3 py-2 font-medium">{s.tableTrendDays}</th>
           </tr>
         </thead>
         <tbody>
