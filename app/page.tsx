@@ -331,6 +331,13 @@ export default function Home() {
 
             <InterpretationBox text={interp("overview")} lang={lang} source={result.interpretationSource} />
 
+            {result.interpretations.verdict && (
+              <section className="rounded-lg border border-amber/40 bg-amber/5 p-4">
+                <h2 className="font-display text-sm font-semibold text-amber">{s.sectionVerdict}</h2>
+                <InterpretationBox text={interp("verdict")} lang={lang} source={result.interpretationSource} />
+              </section>
+            )}
+
             <section className="rounded-lg border border-line bg-panel p-4">
               <h2 className="font-display text-sm font-semibold text-fg">
                 {s.sectionPrice} — {result.ticker}
@@ -349,10 +356,12 @@ export default function Home() {
               <section className="rounded-lg border border-line bg-panel p-4">
                 <h2 className="font-display text-sm font-semibold text-rise">{s.sectionPositiveDist}</h2>
                 <HistogramChart values={result.summary.filter((r) => r.trendTotal > 0).map((r) => r.trendTotal)} color="#37C77A" />
+                <InterpretationBox text={interp("distPositive")} lang={lang} source={result.interpretationSource} />
               </section>
               <section className="rounded-lg border border-line bg-panel p-4">
                 <h2 className="font-display text-sm font-semibold text-fall">{s.sectionNegativeDist}</h2>
                 <HistogramChart values={result.summary.filter((r) => r.trendTotal < 0).map((r) => r.trendTotal)} color="#FF5C5C" />
+                <InterpretationBox text={interp("distNegative")} lang={lang} source={result.interpretationSource} />
               </section>
             </div>
 
