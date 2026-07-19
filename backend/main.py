@@ -69,14 +69,57 @@ session.headers.update({
 # ==========================
 # Price history fetching
 # ==========================
-# Yahoo Finance (used by yfinance) increasingly blocks requests coming from
-# cloud/serverless IPs (Vercel, AWS, etc.) even though the exact same code
-# works fine on a local machine — it silently returns an empty dataframe
-# rather than a clear error. Stooq has no API key and, in practice, isn't
-# subject to the same datacenter-IP blocking, so we try it first and only
-# fall back to yfinance if Stooq doesn't have that symbol (e.g. some
-# non-US or very new/illiquid tickers).
+# Both Yahoo Finance (via yfinance) and Stooq now serve bot-detection/HTML
+# challenge pages to requests coming from cloud/serverless IPs (Vercel, AWS,
+# etc.) instead of data — this is IP-reputation based blocking, not
+# something fixable by tweaking headers. Twelve Data is a proper API (key
+# required, free tier, no credit card) meant for exactly this kind of
+# server-to-server use, so it's tried first if TWELVEDATA_API_KEY is set.
+# Stooq/yfinance are kept as best-effort fallbacks in case they ever work
+# again for a given deployment, but Twelve Data is the reliable path.
+TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY")
 STOOQ_URL = "https://stooq.com/q/d/l/"
+
+
+def fetch_from_twelvedata(ticker: str, start: datetime, reasons: List[str]) -> Optional[pd.DataFrame]:
+    if not TWELVEDATA_API_KEY:
+        reasons.append("twelvedata: TWELVEDATA_API_KEY not set")
+        return None
+    try:
+        resp = requests.get(
+            "https://api.twelvedata.com/time_series",
+            params={
+                "symbol": ticker,
+                "interval": "1day",
+                "outputsize": 5000,  # comfortably covers this app's 10-year max window
+                "apikey": TWELVEDATA_API_KEY,
+            },
+            timeout=15,
+        )
+        data = resp.json()
+        if not isinstance(data, dict) or data.get("status") == "error" or "values" not in data:
+            reasons.append(f"twelvedata: {data.get('message', 'unexpected response')}" if isinstance(data, dict) else "twelvedata: unexpected response")
+            return None
+        rows = data["values"]
+        if not rows:
+            reasons.append("twelvedata: empty values list")
+            return None
+        df = pd.DataFrame(rows)
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df = df.set_index("datetime").sort_index()
+        df = df.rename(columns={
+            "open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume",
+        })
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df[df.index >= pd.Timestamp(start.date())]
+        if df.empty:
+            reasons.append("twelvedata: no rows within requested date range")
+            return None
+        return df[["Open", "High", "Low", "Close", "Volume"]]
+    except Exception as exc:
+        reasons.append(f"twelvedata: {exc}")
+        return None
 
 
 def fetch_from_stooq(ticker: str, start: datetime, reasons: List[str]) -> Optional[pd.DataFrame]:
@@ -117,6 +160,11 @@ def fetch_from_stooq(ticker: str, start: datetime, reasons: List[str]) -> Option
 def fetch_price_history(ticker: str, start: datetime) -> "tuple[Optional[pd.DataFrame], str, List[str]]":
     """Returns (dataframe_or_None, source_name, list_of_failure_reasons)."""
     reasons: List[str] = []
+
+    df = fetch_from_twelvedata(ticker, start, reasons)
+    if df is not None and not df.empty:
+        return df, "twelvedata", reasons
+
     df = fetch_from_stooq(ticker, start, reasons)
     if df is not None and not df.empty:
         return df, "stooq", reasons
@@ -1139,7 +1187,7 @@ def analyze(
         raise HTTPException(
             status_code=422,
             detail=(
-                f"No data returned for \"{ticker}\" from Stooq or Yahoo Finance. "
+                f"No data returned for \"{ticker}\" from Twelve Data, Stooq, or Yahoo Finance. "
                 f"Check the ticker symbol. Details: {reason_str}"
             ),
         )
