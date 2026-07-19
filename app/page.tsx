@@ -51,7 +51,7 @@ export default function Home() {
     setLoading(true);
     setError(null);
     try {
-      const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const apiBase = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/+$/, "");
       const params = new URLSearchParams({
         ticker: ticker.trim(),
         days: String(days),

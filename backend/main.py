@@ -25,6 +25,7 @@ Run locally:
 Then GET http://localhost:8000/api/analyze?ticker=AAPL&days=1095&threshold=10
 """
 
+import io
 import json
 import math
 import os
@@ -64,6 +65,59 @@ session.headers.update({
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
 })
+
+# ==========================
+# Price history fetching
+# ==========================
+# Yahoo Finance (used by yfinance) increasingly blocks requests coming from
+# cloud/serverless IPs (Vercel, AWS, etc.) even though the exact same code
+# works fine on a local machine — it silently returns an empty dataframe
+# rather than a clear error. Stooq has no API key and, in practice, isn't
+# subject to the same datacenter-IP blocking, so we try it first and only
+# fall back to yfinance if Stooq doesn't have that symbol (e.g. some
+# non-US or very new/illiquid tickers).
+STOOQ_URL = "https://stooq.com/q/d/l/"
+
+
+def fetch_from_stooq(ticker: str, start: datetime) -> Optional[pd.DataFrame]:
+    candidates = [ticker.lower(), f"{ticker.lower()}.us"]
+    for symbol in candidates:
+        try:
+            resp = requests.get(STOOQ_URL, params={"s": symbol, "i": "d"}, timeout=10)
+            if resp.status_code != 200:
+                continue
+            text = resp.text.strip()
+            if not text or text.lower().startswith("no data") or "Date" not in text.splitlines()[0]:
+                continue
+            df = pd.read_csv(io.StringIO(text))
+            if df.empty or "Date" not in df.columns or "Close" not in df.columns:
+                continue
+            df["Date"] = pd.to_datetime(df["Date"])
+            df = df.set_index("Date").sort_index()
+            df = df[df.index >= pd.Timestamp(start.date())]
+            if df.empty:
+                continue
+            return df[["Open", "High", "Low", "Close", "Volume"]]
+        except Exception:
+            continue
+    return None
+
+
+def fetch_price_history(ticker: str, start: datetime) -> "tuple[Optional[pd.DataFrame], str]":
+    """Returns (dataframe_or_None, source_name)."""
+    df = fetch_from_stooq(ticker, start)
+    if df is not None and not df.empty:
+        return df, "stooq"
+
+    try:
+        ticker_obj = yf.Ticker(ticker, session=session)
+        df = ticker_obj.history(start=start, interval="1d")
+        if df is not None and not df.empty:
+            return df, "yfinance"
+    except Exception:
+        pass
+
+    return None, "none"
 
 # ==========================
 # Optional AI-generated interpretations (Anthropic API)
@@ -1065,15 +1119,13 @@ def analyze(
     # number of trading days we end up with. Use modern UTC timezone syntax.
     start = datetime.now(timezone.utc) - timedelta(days=math.ceil(days * 1.6) + 5)
 
-    try:
-        # Pass the configured session directly to Ticker to bypass scraping blocks
-        ticker_obj = yf.Ticker(ticker, session=session)
-        raw = ticker_obj.history(start=start, interval="1d")
-    except Exception as exc:  # yfinance raises a mix of exception types
-        raise HTTPException(status_code=502, detail=f"Failed to fetch data for \"{ticker}\": {exc}")
+    raw, data_source = fetch_price_history(ticker, start)
 
     if raw is None or raw.empty:
-        raise HTTPException(status_code=422, detail=f"No data returned for \"{ticker}\". Check the ticker symbol.")
+        raise HTTPException(
+            status_code=422,
+            detail=f"No data returned for \"{ticker}\" from Stooq or Yahoo Finance. Check the ticker symbol.",
+        )
 
     hist = raw.copy()
     hist["Variation %"] = hist["Close"].pct_change() * 100
