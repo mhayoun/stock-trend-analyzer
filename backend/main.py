@@ -79,45 +79,58 @@ session.headers.update({
 STOOQ_URL = "https://stooq.com/q/d/l/"
 
 
-def fetch_from_stooq(ticker: str, start: datetime) -> Optional[pd.DataFrame]:
+def fetch_from_stooq(ticker: str, start: datetime, reasons: List[str]) -> Optional[pd.DataFrame]:
     candidates = [ticker.lower(), f"{ticker.lower()}.us"]
     for symbol in candidates:
         try:
-            resp = requests.get(STOOQ_URL, params={"s": symbol, "i": "d"}, timeout=10)
+            # Use the shared browser-UA session — Stooq (like Yahoo) can
+            # reject/redirect plain python-requests default user agents.
+            resp = session.get(STOOQ_URL, params={"s": symbol, "i": "d"}, timeout=10)
             if resp.status_code != 200:
+                reasons.append(f"stooq[{symbol}]: HTTP {resp.status_code}")
                 continue
             text = resp.text.strip()
-            if not text or text.lower().startswith("no data") or "Date" not in text.splitlines()[0]:
+            if not text:
+                reasons.append(f"stooq[{symbol}]: empty response")
+                continue
+            first_line = text.splitlines()[0]
+            if text.lower().startswith("no data") or "Date" not in first_line:
+                reasons.append(f"stooq[{symbol}]: unexpected response ({first_line[:80]!r})")
                 continue
             df = pd.read_csv(io.StringIO(text))
             if df.empty or "Date" not in df.columns or "Close" not in df.columns:
+                reasons.append(f"stooq[{symbol}]: no rows/columns in CSV")
                 continue
             df["Date"] = pd.to_datetime(df["Date"])
             df = df.set_index("Date").sort_index()
             df = df[df.index >= pd.Timestamp(start.date())]
             if df.empty:
+                reasons.append(f"stooq[{symbol}]: no rows within requested date range")
                 continue
             return df[["Open", "High", "Low", "Close", "Volume"]]
-        except Exception:
+        except Exception as exc:
+            reasons.append(f"stooq[{symbol}]: {exc}")
             continue
     return None
 
 
-def fetch_price_history(ticker: str, start: datetime) -> "tuple[Optional[pd.DataFrame], str]":
-    """Returns (dataframe_or_None, source_name)."""
-    df = fetch_from_stooq(ticker, start)
+def fetch_price_history(ticker: str, start: datetime) -> "tuple[Optional[pd.DataFrame], str, List[str]]":
+    """Returns (dataframe_or_None, source_name, list_of_failure_reasons)."""
+    reasons: List[str] = []
+    df = fetch_from_stooq(ticker, start, reasons)
     if df is not None and not df.empty:
-        return df, "stooq"
+        return df, "stooq", reasons
 
     try:
         ticker_obj = yf.Ticker(ticker, session=session)
         df = ticker_obj.history(start=start, interval="1d")
         if df is not None and not df.empty:
-            return df, "yfinance"
-    except Exception:
-        pass
+            return df, "yfinance", reasons
+        reasons.append("yfinance: returned empty dataframe")
+    except Exception as exc:
+        reasons.append(f"yfinance: {exc}")
 
-    return None, "none"
+    return None, "none", reasons
 
 # ==========================
 # Optional AI-generated interpretations (Anthropic API)
@@ -1119,12 +1132,16 @@ def analyze(
     # number of trading days we end up with. Use modern UTC timezone syntax.
     start = datetime.now(timezone.utc) - timedelta(days=math.ceil(days * 1.6) + 5)
 
-    raw, data_source = fetch_price_history(ticker, start)
+    raw, data_source, fetch_reasons = fetch_price_history(ticker, start)
 
     if raw is None or raw.empty:
+        reason_str = "; ".join(fetch_reasons) if fetch_reasons else "no diagnostic info"
         raise HTTPException(
             status_code=422,
-            detail=f"No data returned for \"{ticker}\" from Stooq or Yahoo Finance. Check the ticker symbol.",
+            detail=(
+                f"No data returned for \"{ticker}\" from Stooq or Yahoo Finance. "
+                f"Check the ticker symbol. Details: {reason_str}"
+            ),
         )
 
     hist = raw.copy()
