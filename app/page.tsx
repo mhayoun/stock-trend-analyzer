@@ -65,7 +65,15 @@ export default function Home() {
         ai: String(aiEnabled),
       });
       const res = await fetch(`${apiBase}/api/analyze?${params.toString()}`);
-      const data = await res.json();
+      const text = await res.text();
+      let data: any;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(
+          res.ok ? "The server returned an unexpected response." : text || `Request failed (${res.status}).`
+        );
+      }
       if (!res.ok) throw new Error(data.detail || data.error || "Something went wrong.");
       setResult(data);
     } catch (err: any) {

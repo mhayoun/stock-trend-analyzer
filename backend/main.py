@@ -375,6 +375,9 @@ def simulate_strategies(
                 sp_i += 1
 
             if holding and sp_i < len(sell_positions) and sell_positions[sp_i] == pos and pos > 0:
+                sp_i += 1  # consume this signal now — rebuy_pos can equal pos
+                           # (no room left to search forward) which would
+                           # otherwise re-trigger the same signal forever
                 sell_price = float(closes.iloc[pos])
                 cash = shares * sell_price
                 shares = 0.0
@@ -499,8 +502,8 @@ def rule_based_interpretations(snap: dict) -> Dict[str, Dict[str, str]]:
     pos_dur = snap.get("overallPositiveAvgDuration")
     neg_dur = snap.get("overallNegativeAvgDuration")
 
-    def fmtnum(v: float) -> str:
-        return f"{v:+.1f}"
+    def fmtnum(v: Optional[float]) -> str:
+        return "n/a" if v is None else f"{v:+.1f}"
 
     out: Dict[str, Dict[str, str]] = {}
 
@@ -1193,7 +1196,16 @@ def analyze(
         )
 
     hist = raw.copy()
-    hist["Variation %"] = hist["Close"].pct_change() * 100
+    # Some sources (yfinance in particular) occasionally return a trailing
+    # row for the most recent session with a NaN Close (data still
+    # settling) but a populated Volume. pandas' pct_change(fill_method=
+    # "pad") — the default prior to pandas 2.2 deprecating it — would
+    # forward-fill that NaN before diffing, turning it into a bogus 0.0%
+    # day that survives the dropna below while Close stays NaN. Drop those
+    # rows outright and disable the pad-fill so a real gap always shows up
+    # as NaN in "Variation %" and gets dropped.
+    hist = hist.dropna(subset=["Close"])
+    hist["Variation %"] = hist["Close"].pct_change(fill_method=None) * 100
     hist = hist.dropna(subset=["Variation %"])
 
     if len(hist) < 2:
